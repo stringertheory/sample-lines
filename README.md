@@ -43,14 +43,14 @@ samp -n <NUM> [--seed <SEED>] [FILE]
 Here are a few examples:
 
 ```bash
-samp --help                                   # Show help
-cat data.txt | samp -n 10                     # Keep 10 lines, with pipe
-samp -n 10 data.txt                           # Giving filename
-samp -n 10 < data.txt                         # Standard in
-samp -n 10 --seed 17 < data.txt               # Reproducible sample
-cat data.csv | samp -n 10 --preserve-headers  # Preserve 1 header line
-samp -r 0.01 < big.log                        # Keep ~1% of lines
-samp -r 0.10 --seed 17 data.csv -p            # Reproducible 10% sample
+samp --help                                     # Show help
+cat data.txt | samp -n 10                       # Keep 10 lines, with pipe
+samp -n 10 data.txt                             # Giving filename
+samp -n 10 < data.txt                           # Standard in
+samp -n 10 --seed 17 < data.txt                 # Reproducible sample
+cat data.csv | samp -n 10 --preserve-headers 1  # Preserve 1 header line
+samp -r 0.01 < big.log                          # Keep ~1% of lines
+samp -r 0.10 --seed 17 -p 1 data.csv            # Reproducible 10% sample
 ```
 
 ### Options
@@ -62,9 +62,12 @@ One of `--number` or `--rate` is **required**, but you can not pass both.
 | `-n, --number <NUM>` | Number of lines to sample |
 | `-r, --rate <RATE>` | Sampling rate: probability to include each line (e.g., 0.05) |
 | `-s, --seed <SEED>` | Optional seed for reproducible sampling |
-| `-p, --preserve-headers [N]` | Preserve the first `N` lines as headers (default: 1 if flag is used) |
+| `-p, --preserve-headers <NUM>` | Preserve the first `NUM` lines as headers |
 | `-h`, `--help` | Show help message |
 | `--version` | Show the version number |
+
+Lines are handled as raw bytes, so input doesn't have to be valid UTF-8
+and CRLF line endings are preserved.
 
 ## Testing
 

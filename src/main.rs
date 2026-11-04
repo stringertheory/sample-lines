@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::fs::File;
 use std::io::ErrorKind;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process;
 use std::str::FromStr;
 
@@ -16,12 +16,30 @@ struct Config {
     preserve_headers: Option<usize>,
 }
 
+/// Iterate over lines as raw bytes, so input doesn't have to be valid UTF-8.
+/// Only the trailing `\n` is removed, which keeps any `\r` from CRLF input.
+fn byte_lines<R: BufRead>(mut reader: R) -> impl Iterator<Item = io::Result<Vec<u8>>> {
+    std::iter::from_fn(move || {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => None,
+            Ok(_) => {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                Some(Ok(line))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    })
+}
+
 /// Perform reservoir sampling on lines from an iterator
-fn reservoir_sample<I>(lines: I, k: usize, mut rng: StdRng) -> io::Result<Vec<String>>
+fn reservoir_sample<T, I>(lines: I, k: usize, mut rng: StdRng) -> io::Result<Vec<T>>
 where
-    I: Iterator<Item = Result<String, io::Error>>,
+    I: Iterator<Item = io::Result<T>>,
 {
-    let mut reservoir: Vec<String> = Vec::with_capacity(k);
+    let mut reservoir: Vec<T> = Vec::with_capacity(k);
 
     for (total, line_result) in lines.enumerate() {
         let line = line_result?;
@@ -39,9 +57,9 @@ where
 }
 
 /// Perform probability-based sampling on lines from an iterator
-fn probability_sample<I>(lines: I, p: f64, mut rng: StdRng) -> io::Result<Vec<String>>
+fn probability_sample<T, I>(lines: I, p: f64, mut rng: StdRng) -> io::Result<Vec<T>>
 where
-    I: Iterator<Item = Result<String, io::Error>>,
+    I: Iterator<Item = io::Result<T>>,
 {
     let mut sampled = Vec::new();
     for line_result in lines {
@@ -53,25 +71,34 @@ where
     Ok(sampled)
 }
 
-/// Write sampled lines to stdout, handling broken pipes gracefully
-fn write_results(lines: Vec<String>) -> io::Result<()> {
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
+/// Write one line, exiting cleanly if the downstream consumer has gone away
+fn write_line(handle: &mut impl Write, line: &[u8]) -> io::Result<()> {
+    exit_on_broken_pipe(handle.write_all(line).and_then(|_| handle.write_all(b"\n")))
+}
+
+fn exit_on_broken_pipe(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => process::exit(0),
+        result => result,
+    }
+}
+
+/// Write sampled lines to stdout
+fn write_results(lines: Vec<Vec<u8>>) -> io::Result<()> {
+    let mut handle = BufWriter::new(io::stdout().lock());
 
     for line in lines {
-        match writeln!(handle, "{}", line) {
-            Ok(_) => (),
-            Err(e) if e.kind() == ErrorKind::BrokenPipe => process::exit(0),
-            Err(e) => return Err(e),
-        }
+        write_line(&mut handle, &line)?;
     }
 
-    Ok(())
+    // Dropping a BufWriter ignores write errors, so flush explicitly.
+    exit_on_broken_pipe(handle.flush())
 }
 
 /// Parse command line arguments using clap
 fn parse_args() -> Config {
     let matches = Command::new("samp")
+        .version(env!("CARGO_PKG_VERSION"))
         .about("Randomly sample lines from a file or stdin")
         .arg(
             Arg::new("sample_size")
@@ -110,11 +137,8 @@ fn parse_args() -> Config {
             Arg::new("preserve_headers")
                 .short('p')
                 .long("preserve-headers")
-                .num_args(0..=1)
                 .value_name("NUM")
-                .help(
-                    "Number of header lines to preserve (default: 1 if specified without a value)",
-                )
+                .help("Number of header lines to preserve")
                 .value_parser(clap::value_parser!(usize)),
         )
         .arg(
@@ -125,24 +149,19 @@ fn parse_args() -> Config {
         )
         .after_help(
             "Example usage:
-    samp -n 10 file.txt
-    samp -r 0.05 < file.txt",
+    cat data.txt | samp -n 10
+    samp -r 0.05 < big.log
+    (head -n 1 && tail -n +2 data.csv | samp -n 10) < data.csv
+    samp -n 10 --preserve-headers 1 < data.csv # same as above",
         )
         .get_matches();
-
-    let preserve_headers = matches.get_raw("preserve_headers").map(|_| {
-        matches
-            .get_one::<usize>("preserve_headers")
-            .copied()
-            .unwrap_or(1)
-    });
 
     Config {
         sample_size: matches.get_one::<usize>("sample_size").copied(),
         rate: matches.get_one::<f64>("rate").copied(),
         seed: matches.get_one::<u64>("seed").copied(),
         filename: matches.get_one::<String>("file").cloned(),
-        preserve_headers,
+        preserve_headers: matches.get_one::<usize>("preserve_headers").copied(),
     }
 }
 
@@ -169,13 +188,13 @@ fn main() -> io::Result<()> {
         None => Box::new(BufReader::new(io::stdin())),
     };
 
-    let mut lines = reader.lines();
+    let mut lines = byte_lines(reader);
 
     // Output preserved headers
     if let Some(num_headers) = config.preserve_headers {
         for _ in 0..num_headers {
             match lines.next() {
-                Some(Ok(line)) => println!("{}", line),
+                Some(Ok(line)) => write_line(&mut io::stdout(), &line)?,
                 Some(Err(e)) => {
                     eprintln!("Error reading input: {}", e);
                     process::exit(1);
@@ -379,8 +398,10 @@ mod tests {
             .stdout
             .take()
             .expect("Failed to open stdout");
-        let mut buf = [0u8; 10];
-        stdout.read(&mut buf).expect("Failed to read from stdout");
+        let mut buf = [0u8; 1];
+        stdout
+            .read_exact(&mut buf)
+            .expect("Failed to read from stdout");
         drop(stdout);
 
         let status = child_with_head.wait().expect("Failed to wait on child");
@@ -565,6 +586,183 @@ mod tests {
 
         let expected: Vec<&str> = input_data.lines().collect();
         assert_eq!(result_lines, expected, "Expected all lines to be sampled");
+    }
+
+    fn run_samp(args: &[&str], input: &[u8]) -> std::process::Output {
+        let mut child = Command::new(find_executable())
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to execute process");
+
+        child
+            .stdin
+            .take()
+            .expect("Failed to open stdin")
+            .write_all(input)
+            .unwrap();
+
+        child.wait_with_output().expect("Failed to wait on child")
+    }
+
+    #[test]
+    fn test_invalid_utf8_passes_through() {
+        let input = b"caf\xe9\n\xff\xfe\nplain\n";
+
+        let output = run_samp(&["-r", "1.0"], input);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+
+        let output = run_samp(&["-n", "3"], input);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+    }
+
+    #[test]
+    fn test_invalid_utf8_in_header() {
+        let input = b"h\xff\na\nb\n";
+
+        let output = run_samp(&["-r", "1.0", "-p", "1"], input);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+    }
+
+    #[test]
+    fn test_crlf_preserved() {
+        let input = b"h\r\na\r\nb\r\n";
+
+        let output = run_samp(&["-r", "1.0", "-p", "1"], input);
+        assert_eq!(output.stdout, input);
+    }
+
+    #[test]
+    fn test_missing_final_newline_is_added() {
+        let output = run_samp(&["-r", "1.0"], b"a\nb");
+        assert_eq!(output.stdout, b"a\nb\n");
+    }
+
+    #[test]
+    fn test_empty_lines_are_kept() {
+        let input = b"a\n\n\nb\n";
+
+        let output = run_samp(&["-r", "1.0"], input);
+        assert_eq!(output.stdout, input);
+    }
+
+    #[test]
+    fn test_broken_pipe_while_writing_large_sample() {
+        // Larger than any stdout buffer, so the write fails mid-sample.
+        let input = "some line of input\n".repeat(100_000);
+
+        let mut child = Command::new(find_executable())
+            .arg("-r")
+            .arg("1.0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to execute process");
+
+        drop(child.stdout.take());
+        child
+            .stdin
+            .take()
+            .expect("Failed to open stdin")
+            .write_all(input.as_bytes())
+            .unwrap();
+
+        let output = child.wait_with_output().expect("Failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Unexpected failure: {}", stderr);
+        assert!(stderr.is_empty(), "Unexpected stderr: {}", stderr);
+    }
+
+    #[test]
+    fn test_broken_pipe_on_final_flush() {
+        // Small enough to sit in a buffer until the flush at the end.
+        let mut child = Command::new(find_executable())
+            .arg("-r")
+            .arg("1.0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to execute process");
+
+        drop(child.stdout.take());
+        child
+            .stdin
+            .take()
+            .expect("Failed to open stdin")
+            .write_all(b"a\nb\n")
+            .unwrap();
+
+        let output = child.wait_with_output().expect("Failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Unexpected failure: {}", stderr);
+        assert!(stderr.is_empty(), "Unexpected stderr: {}", stderr);
+    }
+
+    #[test]
+    fn test_preserve_headers_requires_a_number() {
+        let output = run_samp(&["-n", "1", "-p"], b"a\n");
+        assert!(!output.status.success());
+
+        let output = run_samp(&["-n", "1", "-p", "data.csv"], b"a\n");
+        assert!(!output.status.success());
+    }
+
+    #[test]
+    fn test_preserve_headers_before_filename() {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        temp_file.write_all(b"h\na\n").unwrap();
+        let temp_path = temp_file.path().to_str().unwrap();
+
+        let output = run_samp(&["-n", "1", "-p", "1", temp_path], b"");
+        assert_eq!(output.stdout, b"h\na\n");
+    }
+
+    #[test]
+    fn test_version_flag() {
+        let output = Command::new(find_executable())
+            .arg("--version")
+            .output()
+            .expect("Failed to execute process");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("samp {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn test_broken_pipe_during_headers() {
+        let mut child = Command::new(find_executable())
+            .arg("-n")
+            .arg("1")
+            .arg("-p")
+            .arg("2")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to execute process");
+
+        // Close the read end before samp has any input, so its first header
+        // write is guaranteed to hit a closed pipe.
+        drop(child.stdout.take());
+        {
+            let mut stdin = child.stdin.take().expect("Failed to open stdin");
+            stdin.write_all(b"h1\nh2\na\nb\n").unwrap();
+        }
+
+        let output = child.wait_with_output().expect("Failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Unexpected failure: {}", stderr);
+        assert!(stderr.is_empty(), "Unexpected stderr: {}", stderr);
     }
 
     #[test]
