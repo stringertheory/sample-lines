@@ -37,7 +37,7 @@ cargo build --release
 ## Usage
 
 ```bash
-samp -n <NUM> [--seed <SEED>] [FILE]
+samp (-n <NUM> | -r <RATE>) [-s <SEED>] [-p <NUM>] [FILE]
 ```
 
 Here are a few examples:
