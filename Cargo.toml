@@ -5,10 +5,10 @@ edition = "2021"
 authors = ["Mike Stringer <mike.stringer.internet@gmail.com>"]
 description = "Command-line tool to sample lines from a file or stdin without replacement. It runs in one pass without reading the whole input into memory using reservoir sampling."
 license = "MIT"
-repository = "https://github.com/stringertheory/sample"
+repository = "https://github.com/stringertheory/sample-lines"
 categories = ["command-line-utilities"]
 keywords = ["cli", "sampling", "analysis"]
-exclude = ["/.github", "/target", "/*.log"]
+exclude = ["/.github", "/target", "/*.log", "/AGENTS.md"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
