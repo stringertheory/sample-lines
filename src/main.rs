@@ -597,12 +597,16 @@ mod tests {
             .spawn()
             .expect("Failed to execute process");
 
-        child
+        let write_result = child
             .stdin
             .take()
             .expect("Failed to open stdin")
-            .write_all(input)
-            .unwrap();
+            .write_all(input);
+
+        // samp may exit before reading stdin, for example on a usage error.
+        if let Err(e) = write_result {
+            assert_eq!(e.kind(), ErrorKind::BrokenPipe);
+        }
 
         child.wait_with_output().expect("Failed to wait on child")
     }
