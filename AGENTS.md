@@ -42,4 +42,5 @@ Both collect results in a `Vec` and write only after reading all input. Memory u
 
 ## Repo notes
 
+- CI (`.github/workflows/ci.yml`) runs fmt, clippy with warnings denied, build, then tests on pushes to `main` and on pull requests.
 - `kk.py` and `ll.py` in the repo root are untracked scratch scripts that print large random CSVs to stdout (100M and 10M rows). Don't commit them or any CSVs generated from them; only `/target` is gitignored.
